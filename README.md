@@ -31,8 +31,13 @@ icon, and an optional "start with Windows" entry.
 
 ## Quick start
 
+**Ready-to-run download:** [`release/SwitchProXInput-v1.2.0-win64.zip`](release/SwitchProXInput-v1.2.0-win64.zip)
+contains the 64-bit exe, `ViGEmClient.dll`, the config file, this README and
+`SHA256SUMS.txt`. (GitHub: *Code → Download ZIP* works too, the files sit at
+the repo root as well.)
+
 1. Install the ViGEmBus driver (above).
-2. Unzip the release so `SwitchProXInput.exe`, `ViGEmClient.dll` and
+2. Unzip so `SwitchProXInput.exe`, `ViGEmClient.dll` and
    `SwitchProXInput.ini` sit in one folder.
 3. Run `SwitchProXInput.exe`, plug in the controller, and start your game.
    The window shows driver and controller status live; games will see an
@@ -51,6 +56,9 @@ scrolls (mouse wheel or the slim scrollbar) so every setting stays reachable.
 - **Controller** — face-button layout, Capture/Home mapping, L/ZL + R/ZR swap.
 - **Sticks** — deadzone and deflection-range sliders per stick, plus X/Y
   invert toggles. Changes apply live while you drag.
+- **Anti-drift** — automatic stick-drift detection and correction, see
+  [Stick drift fix](#stick-drift-fix). The card shows live what kind of
+  drift was detected on each stick and what the app is doing about it.
 - **Features** — HD rumble passthrough, number of virtual pads.
 - **Controller IDs** — VID:PID list for third-party pads.
 - **System** — *Start with Windows* (registry Run key, launches minimized),
@@ -87,6 +95,43 @@ Sticks use a radial deadzone (10% default) and are scaled so full physical
 deflection reaches the full XInput range. Triggers are digital because the
 Pro Controller has no analog triggers — games see them fully pressed.
 
+## Stick drift fix
+
+Worn sticks drift, and the app detects and corrects both drift types
+automatically — no manual measuring:
+
+| Drift type | What it is | Automatic correction |
+|---|---|---|
+| **Center offset** (bias) | the resting position moved away from center, e.g. the stick reports 2150 instead of 2048 while untouched — the game walks/steers on its own | the true resting center is learned while the stick is untouched and the output is re-centered on it, continuously, so slowly worsening drift keeps being cancelled |
+| **Jitter** (noise) | the resting value bounces around — random motion leaks through whenever a bounce exceeds the deadzone | the noise floor is measured and the deadzone is automatically raised just enough to swallow it (never above your slider unless needed) |
+
+Detection works by watching the raw signal: a sample cluster whose two
+halves agree on the same spot is "the stick is untouched" (real motion,
+however slow, keeps travelling; jitter just scatters around a fixed point).
+Center learning only happens while the stick is untouched — input you make
+is never absorbed into the calibration — and a center must be confirmed by
+about a second of real rest before it is trusted, so a deflection you hold
+in-game is never mistaken for the rest position. If a pad is plugged in
+while a stick is being held, the capture self-heals as soon as the stick is
+released and left alone.
+
+Worn sticks can also make the resting spot *jump* intermittently to one
+side ("pulls left"). **Aggressive** strength adds *drift chase* for that:
+if a stick settles somewhere far from the learned center and sits there
+without moving for a couple of seconds, that spot is adopted as the new
+rest position (and the adoption self-heals if it was a mistake). The
+**Anti-drift** card names the pull direction — e.g. `drifts left`.
+
+Everything is on by default (`[DriftFix]` in the INI): correction
+**Enable**, **AutoDeadzone**, and **Strength** (`0` gentle / `1` balanced /
+`2` aggressive — aggressive learns faster and keeps larger safety margins
+for badly worn sticks). The **Anti-drift** card in the window shows per
+stick what was detected — `clean`, `center offset (X …, Y …)`,
+`noisy stick (± …)` or both — and what is being applied (`auto-centered`,
+`auto deadzone N%`). With **Calibrate now** you can force a fresh capture
+of the resting position at any time; just don't touch the sticks for a
+second or two afterwards.
+
 ## Configuration file
 
 Everything the GUI edits lives in `SwitchProXInput.ini`:
@@ -113,6 +158,11 @@ InvertRY=0
 [Features]
 EnableRumble=1              ; pass game rumble to the HD rumble motors
 
+[DriftFix]
+Enable=1                    ; automatic stick-drift correction (see above)
+AutoDeadzone=1              ; deadzone never drops below the measured noise
+Strength=1                  ; 0 gentle, 1 balanced, 2 aggressive
+
 [System]
 Autostart=0                 ; run at logon, minimized in the tray
 MinimizeToTray=1
@@ -121,6 +171,20 @@ CloseToTray=1
 
 ## Changelog
 
+- **v1.2.0** — Automatic stick-drift fix: the app detects the type of drift
+  on each stick (center offset / jitter / both) and its direction,
+  continuously learns the true resting center, and applies corrections plus
+  a noise-floor-based adaptive deadzone. Aggressive strength adds *drift
+  chase* for sticks whose resting spot intermittently snaps to one side.
+  New **Anti-drift** card with live detection status, correction strength
+  (gentle/balanced/aggressive) and a **Calibrate now** button; settings
+  persist in the new `[DriftFix]` INI section. Includes a ready-to-run
+  build in `release/`, a windres-free resource builder (`tools/mkres.py`)
+  and an optional CI workflow (`ci/build-release.workflow.yml` — move it to
+  `.github/workflows/` to enable automatic release builds). Parser refactored
+  (`parseButtons` / `applySticks` / `parseReportCorrected`) and unit tests
+  added for the parser, the drift engine, and the full correction pipeline
+  (`tests/`).
 - **v1.1.1** — Window fixes: standard window frame with real minimize /
   maximize / close buttons and resizable edges (dark title bar on Win10/11),
   initial size clamped to the screen's work area, content scrolls (wheel +
@@ -156,11 +220,27 @@ g++ -std=c++14 -O2 -shared -static-libgcc -static-libstdc++ \
     vendor/ViGEmClient/src/ViGEmClient.cpp -o ViGEmClient.dll -lsetupapi
 ```
 
-Unit tests for the parser (no Windows needed):
+**No `windres` / cross-compiling:** `tools/mkres.py` (pure Python 3)
+produces the resource object `windres app.rc -O coff app_res.o` normally
+makes (icon, manifest, VERSIONINFO):
 
 ```
-g++ -std=c++17 tests/parse_test.cpp -I. -o parse_test && ./parse_test
+python3 tools/mkres.py icon.ico app.manifest app_res.o --version 1.2.0.0
 ```
+
+Add `app_res.o` to the compile line in place of the `windres` output. The
+shipped `SwitchProXInput.exe` can also be rebuilt with Zig's C++ frontend
+(`zig c++ -target x86_64-windows-gnu -O2 -static -mwindows ...`, same libs).
+
+Unit tests for the parser and the drift engine (no Windows needed):
+
+```
+g++ -std=c++17 tests/parse_test.cpp   -I. -o parse_test   && ./parse_test
+g++ -std=c++17 tests/drift_test.cpp   -I. -o drift_test   && ./drift_test
+g++ -std=c++17 tests/pipeline_test.cpp -I. -o pipeline_test && ./pipeline_test
+```
+
+or via CMake: `cmake -B build -DSXPX_BUILD_TESTS=ON && cmake --build build && ctest --test-dir build`.
 
 ### Signing your build
 
@@ -228,6 +308,16 @@ enumeration.
 **Stick feels too sensitive / not reaching full tilt** — drag the
 *Left/Right stick range* sliders (lower = more sensitive) and the deadzones.
 
+**My sticks drift (character walks / camera moves on its own)** — this is
+what the **Anti-drift** card is for; correction is on by default. Leave the
+sticks untouched for a second or two after plugging the pad in so their
+resting position can be captured — the status line then shows what was
+detected and applied. For a badly worn pad set *Correction strength* to
+*Aggressive*, or press **Calibrate now** and don't touch the sticks until
+the line reports the result. If the drift is extreme (the stick is
+physically loose), the fix cancels the resting error but the stick's
+usable range is still reduced — keep *Auto deadzone from noise* on.
+
 **Up/down read swapped on the sticks** — the official Pro Controller over USB
 reports Y the standard way, and the defaults match that. If your pad reports
 Y inverted, switch the LY/RY toggles on.
@@ -243,9 +333,12 @@ Y inverted, switch the LY/RY toggles on.
   without any handshake. `engine.cpp` reads them with the raw Win32 HID API
   (`hid.dll` + SetupAPI device enumeration) using overlapped I/O, one thread
   per controller, plus a watchdog thread for hot-plug.
-- Reports are parsed (`parse.h` — buttons, 12-bit stick data, battery) and
-  mapped to `XUSB_REPORT`, which is pushed to the **ViGEmBus** driver through
-  `ViGEmClient.dll` (loaded dynamically at runtime, no import lib).
+- Reports are parsed (`parse.h` — buttons, 12-bit stick data, battery); the
+  decoded sticks run through the per-stick drift correctors (`drift.h` —
+  resting-center learning, noise-floor tracking, drift-type classification),
+  and the corrected values are mapped to `XUSB_REPORT`, which is pushed to
+  the **ViGEmBus** driver through `ViGEmClient.dll` (loaded dynamically at
+  runtime, no import lib).
 - Games rumble requests come back through the ViGEm notification callback and
   are encoded to the Switch HD-rumble format (`0x10` output report).
 - The GUI (`gui.cpp`) is a custom-drawn Win32 window (GDI double-buffering,

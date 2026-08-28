@@ -19,6 +19,7 @@
 #include <algorithm>
 
 #include "parse.h"
+#include "drift.h"
 #include "config.h"
 #include "engine.h"
 
@@ -53,6 +54,9 @@ enum {
     IDC_INV_RY,
     IDC_RUMBLE,
     IDC_MAXPADS,
+    IDC_DRIFT,
+    IDC_DRIFT_DZ,
+    IDC_DRIFT_STRENGTH,
     IDC_AUTOSTART,
     IDC_TRAYMIN,
     IDC_TRAYCLOSE,
@@ -80,6 +84,7 @@ enum {
 #define COL_TRACK     RGB(43, 46, 56)
 #define COL_KNOB      RGB(232, 234, 240)
 #define COL_HOVITEM   RGB(58, 68, 88)
+#define COL_WARN      RGB(255, 184, 54)
 
 //=============================================================================
 //  Globals
@@ -110,6 +115,8 @@ static bool g_sbDragging = false;
 static Config    g_cfg;
 static AppPrefs  g_prefs;
 static EngineStatus g_status;
+static DriftView g_driftL, g_driftR;   // live drift status of the first pad
+static bool      g_driftValid = false;
 
 static bool g_trayAdded = false;
 static bool g_hidden = false;
@@ -123,6 +130,7 @@ static bool g_tracking = false;
 #define HOT_DEFAULTS -4
 #define HOT_HIDE     -5
 #define HOT_RETRY    -6
+#define HOT_CALIB    -7
 
 //=============================================================================
 //  Control model
@@ -154,6 +162,8 @@ static RECT g_rcStatus, g_rcBtnRetry;
 static RECT g_rcBottomBar, g_rcBtnDefaults, g_rcBtnHide;
 static RECT g_rcEdit;
 static RECT g_invLabelRect;   // label rect of the "Invert axes" row
+static RECT g_rcBtnCalib, g_rcCalibHint;
+static RECT g_rcDriftLineL, g_rcDriftLineR;
 
 static const wchar_t* kMainClass = L"SwitchProXInputMainWnd";
 static const wchar_t* kPopupClass = L"SwitchProXInputPopupWnd";
@@ -383,6 +393,21 @@ static void relayout() {
         g_invLabelRect = { r.left, r.top, gx - S(6), r.bottom };
     }
 
+    RECT sd = startCard(xR, L"ANTI-DRIFT", pad + headH + 4 * rowH + S(2) + 2 * S(20) + pad);
+    cy = sd.top + pad + headH;
+    addToggle(sd, cy, IDC_DRIFT, L"Auto drift correction");
+    addCombo(sd, cy, IDC_DRIFT_STRENGTH, L"Correction strength",
+             { L"Gentle", L"Balanced", L"Aggressive" }, labelW);
+    addToggle(sd, cy, IDC_DRIFT_DZ, L"Auto deadzone from noise");
+    {
+        RECT r = { sd.left + pad, cy, sd.right - pad, cy + rowH };
+        cy += rowH;
+        g_rcBtnCalib = { r.right - S(132), r.top + S(4), r.right, r.bottom - S(4) };
+        g_rcCalibHint = { r.left, r.top, g_rcBtnCalib.left - S(8), r.bottom };
+        g_rcDriftLineL = { r.left, cy + S(2), sd.right - pad, cy + S(2) + S(20) };
+        g_rcDriftLineR = { r.left, cy + S(2) + S(20), sd.right - pad, cy + S(2) + 2 * S(20) };
+    }
+
     RECT s2 = startCard(xR, L"SYSTEM", pad + headH + 3 * rowH + pad);
     cy = s2.top + pad + headH;
     addToggle(s2, cy, IDC_AUTOSTART, L"Start with Windows");
@@ -476,6 +501,9 @@ static void applySetting(int id) {
     case IDC_INV_RY:     g_cfg.invertRY        = c->bval; break;
     case IDC_RUMBLE:     g_cfg.enableRumble    = c->bval; break;
     case IDC_MAXPADS:    g_cfg.maxControllers  = c->ival; break;
+    case IDC_DRIFT:          g_cfg.driftFix          = c->bval; break;
+    case IDC_DRIFT_DZ:       g_cfg.driftAutoDeadzone = c->bval; break;
+    case IDC_DRIFT_STRENGTH: g_cfg.driftStrength     = c->ival; break;
     case IDC_AUTOSTART:
         g_prefs.autostart = c->bval;
         applyAutostartDecl(c->bval);
@@ -505,6 +533,20 @@ static void g_cfgApplyFromSlider(Ctrl* c) {
     default: return;
     }
     engine_apply_config(g_cfg);
+}
+
+// Refresh engine + drift status. Called on engine events and by a timer,
+// because drift statistics evolve while the pad sits idle.
+static void refreshStatus() {
+    g_status = engine_get_status();
+    g_driftValid = false;
+    for (int i = 0; i < g_status.slotCount; ++i) {
+        if (g_status.slots[i].connected &&
+            engine_get_drift(i, g_driftL, g_driftR)) {
+            g_driftValid = true;
+            break;
+        }
+    }
 }
 
 static void commitDevices() {
@@ -539,6 +581,9 @@ static void syncUI() {
     if ((c = ctrl(IDC_INV_RY)))     c->bval = g_cfg.invertRY != 0;
     if ((c = ctrl(IDC_RUMBLE)))     c->bval = g_cfg.enableRumble != 0;
     if ((c = ctrl(IDC_MAXPADS)))    c->ival = g_cfg.maxControllers;
+    if ((c = ctrl(IDC_DRIFT)))          c->bval = g_cfg.driftFix != 0;
+    if ((c = ctrl(IDC_DRIFT_DZ)))       c->bval = g_cfg.driftAutoDeadzone != 0;
+    if ((c = ctrl(IDC_DRIFT_STRENGTH))) c->ival = std::max(0, std::min(2, g_cfg.driftStrength));
     if ((c = ctrl(IDC_AUTOSTART)))  c->bval = g_prefs.autostart;
     if ((c = ctrl(IDC_TRAYMIN)))    c->bval = g_prefs.minimizeToTray;
     if ((c = ctrl(IDC_TRAYCLOSE)))  c->bval = g_prefs.closeToTray;
@@ -907,6 +952,136 @@ static void paintStepper(HDC hdc, const Ctrl& c) {
     drawTextC(hdc, v, buf, g_fText, COL_TEXT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
+// Draw a small-font line made of two differently colored parts.
+static void drawTwoPart(HDC hdc, const RECT& r, const wchar_t* p1, COLORREF c1,
+                        const wchar_t* p2, COLORREF c2) {
+    RECT rc1 = r;
+    drawTextC(hdc, rc1, p1, g_fSmall, c1,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_CALCRECT);
+    drawTextC(hdc, r, p1, g_fSmall, c1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (p2[0]) {
+        RECT r2 = { rc1.right + S(4), r.top, r.right, r.bottom };
+        drawTextC(hdc, r2, p2, g_fSmall, c2,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+}
+
+// Human-readable pull direction from the resting offset (raw space:
+// +X = right, +Y = up). Returns false when no axis is clearly biased.
+static bool driftDirection(int offX, int offY, wchar_t* dir, size_t n) {
+    const int T = 25;                     // matches the detection threshold
+    bool west = offX < -T, east = offX > T;
+    bool north = offY > T, south = offY < -T;
+    const wchar_t* ns = north ? L"up" : south ? L"down" : L"";
+    const wchar_t* ew = east ? L"right" : west ? L"left" : L"";
+    if (!ns[0] && !ew[0]) return false;
+    if (ns[0] && ew[0]) swprintf(dir, n, L"%ls-%ls", ns, ew);
+    else if (ew[0])     swprintf(dir, n, L"%ls", ew);
+    else                swprintf(dir, n, L"%ls", ns);
+    return true;
+}
+
+// Compose the status line for one stick: "<label>: <what was detected>"
+// plus "<what the fix is doing about it>".
+static void driftLineParts(const wchar_t* label, const DriftView& v,
+                           wchar_t* prefix, size_t pn, wchar_t* suffix, size_t sn) {
+    prefix[0] = 0;
+    suffix[0] = 0;
+
+    if (v.calibrating) {
+        swprintf(prefix, pn, L"%ls: calibrating \u2014 don't touch the sticks\u2026", label);
+        return;
+    }
+    if (!v.calibrated) {
+        swprintf(prefix, pn, L"%ls: learning rest position \u2014 release the sticks\u2026", label);
+        return;
+    }
+
+    wchar_t dir[16];
+    switch (v.type) {
+    case DRIFT_OFFSET:
+        if (driftDirection(v.offX, v.offY, dir, 16))
+            swprintf(prefix, pn, L"%ls: drifts %ls (X %+d, Y %+d)", label, dir, v.offX, v.offY);
+        else
+            swprintf(prefix, pn, L"%ls: center offset (X %+d, Y %+d)", label, v.offX, v.offY);
+        break;
+    case DRIFT_JITTER:
+        swprintf(prefix, pn, L"%ls: noisy stick (\u00B1%d)", label, v.noise);
+        break;
+    case DRIFT_BOTH:
+        if (driftDirection(v.offX, v.offY, dir, 16))
+            swprintf(prefix, pn, L"%ls: drifts %ls (X %+d, Y %+d) + noise (\u00B1%d)",
+                     label, dir, v.offX, v.offY, v.noise);
+        else
+            swprintf(prefix, pn, L"%ls: offset (X %+d, Y %+d) + noise (\u00B1%d)",
+                     label, v.offX, v.offY, v.noise);
+        break;
+    default:
+        swprintf(prefix, pn, L"%ls: clean \u2014 no drift detected", label);
+        break;
+    }
+
+    if (!v.enabled) {
+        if (v.type != DRIFT_NONE) swprintf(suffix, sn, L"\u00B7 correction off");
+        return;
+    }
+    switch (v.type) {
+    case DRIFT_OFFSET:
+        swprintf(suffix, sn, L"\u00B7 auto-centered");
+        break;
+    case DRIFT_JITTER:
+        if (v.autoDzPct > 0) swprintf(suffix, sn, L"\u00B7 auto deadzone %d%%", v.autoDzPct);
+        else swprintf(suffix, sn, L"\u00B7 within deadzone");
+        break;
+    case DRIFT_BOTH:
+        if (v.autoDzPct > 0) swprintf(suffix, sn, L"\u00B7 auto-centered, auto-DZ %d%%", v.autoDzPct);
+        else swprintf(suffix, sn, L"\u00B7 auto-centered");
+        break;
+    default:
+        swprintf(suffix, sn, L"\u00B7 no fix needed");
+        break;
+    }
+}
+
+static void paintDriftCard(HDC hdc) {
+    // Calibrate button
+    bool calib = g_driftValid && (g_driftL.calibrating || g_driftR.calibrating);
+    bool hot = g_hotId == HOT_CALIB && !calib;
+    fillRound(hdc, g_rcBtnCalib, S(12),
+              calib ? COL_CARD2 : (hot ? COL_ACCENT2 : COL_ACCENT));
+    drawTextC(hdc, g_rcBtnCalib, calib ? L"Calibrating\u2026" : L"Calibrate now",
+              g_fSmall, calib ? COL_DIM : RGB(255,255,255),
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    drawTextC(hdc, g_rcCalibHint, L"Best with the sticks untouched",
+              g_fSmall, COL_DIM, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    // Status lines
+    if (!g_driftValid) {
+        drawTextC(hdc, g_rcDriftLineL, L"Plug in a controller \u2014 drift status appears here.",
+                  g_fSmall, COL_DIM, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
+    wchar_t p1[96], p2[64];
+
+    if (g_driftL.calibrating || g_driftR.calibrating ||
+        (!g_driftL.calibrated && !g_driftR.calibrated)) {
+        // Both sticks share one message while (re)calibrating.
+        driftLineParts(L"L", g_driftL, p1, 96, p2, 64);
+        drawTextC(hdc, g_rcDriftLineL, p1, g_fSmall, COL_ACCENT2,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        return;
+    }
+
+    driftLineParts(L"L", g_driftL, p1, 96, p2, 64);
+    drawTwoPart(hdc, g_rcDriftLineL, p1,
+                g_driftL.type == DRIFT_NONE ? COL_GREEN : COL_WARN,
+                p2, g_driftL.enabled || g_driftL.type == DRIFT_NONE ? COL_GREEN : COL_WARN);
+    driftLineParts(L"R", g_driftR, p1, 96, p2, 64);
+    drawTwoPart(hdc, g_rcDriftLineR, p1,
+                g_driftR.type == DRIFT_NONE ? COL_GREEN : COL_WARN,
+                p2, g_driftR.enabled || g_driftR.type == DRIFT_NONE ? COL_GREEN : COL_WARN);
+}
+
 static void paintBottomBar(HDC hdc) {
     bool hotD = g_hotId == HOT_DEFAULTS;
     fillRound(hdc, g_rcBtnDefaults, S(14), hotD ? COL_CARD2 : COL_CARD);
@@ -921,7 +1096,7 @@ static void paintBottomBar(HDC hdc) {
 
     drawTextC(hdc, { g_rcBtnDefaults.right + S(12), g_rcBtnDefaults.top,
                      g_rcBtnHide.left - S(12), g_rcBtnDefaults.bottom },
-              L"v1.1.1", g_fSmall, COL_DIM,
+              L"v1.2.0", g_fSmall, COL_DIM,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
@@ -956,6 +1131,7 @@ static void paintAll(HDC hdc) {
                   g_fSmall, COL_DIM, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     }
 
+    paintDriftCard(hdc);
     paintBottomBar(hdc);
 }
 
@@ -974,6 +1150,7 @@ static void paintScrollbar(HDC hdc) {
 static int hitTest(POINT pt) {
     if (PtInRect(&g_rcBtnDefaults, pt)) return HOT_DEFAULTS;
     if (PtInRect(&g_rcBtnHide, pt)) return HOT_HIDE;
+    if (PtInRect(&g_rcBtnCalib, pt)) return HOT_CALIB;
     if (!g_status.busConnected && PtInRect(&g_rcBtnRetry, pt)) return HOT_RETRY;
     for (auto it = g_ctrls.rbegin(); it != g_ctrls.rend(); ++it) {
         const Ctrl& c = *it;
@@ -1038,9 +1215,15 @@ static void onLButtonDown(POINT pt) {
 
     if (id == HOT_DEFAULTS) { restoreDefaults(); return; }
     if (id == HOT_HIDE) { hideToTray(); return; }
+    if (id == HOT_CALIB) {
+        engine_calibrate_sticks();
+        refreshStatus();
+        InvalidateRect(g_hwnd, NULL, TRUE);
+        return;
+    }
     if (id == HOT_RETRY) {
         engine_try_connect_bus();
-        g_status = engine_get_status();
+        refreshStatus();
         InvalidateRect(g_hwnd, NULL, TRUE);
         return;
     }
@@ -1314,8 +1497,15 @@ static LRESULT CALLBACK mainWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
 
     case WM_APP_ENGINE_EVENT:
-        g_status = engine_get_status();
+        refreshStatus();
         InvalidateRect(h, NULL, TRUE);
+        return 0;
+
+    case WM_TIMER:                          // drift statistics evolve over time
+        if (w == 1) {
+            refreshStatus();
+            if (!g_hidden) InvalidateRect(h, NULL, TRUE);
+        }
         return 0;
 
     case WM_APP_TRAY:
@@ -1335,6 +1525,7 @@ static LRESULT CALLBACK mainWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
 
     case WM_DESTROY:
+        KillTimer(h, 1);
         if (g_brushEdit) { DeleteObject(g_brushEdit); g_brushEdit = NULL; }
         PostQuitMessage(0);
         return 0;
@@ -1399,7 +1590,7 @@ int gui_run(HINSTANCE hInst, bool startHidden) {
     int posX = wa.left + std::max(0, (int)((wa.right - wa.left) - winW) / 2);
     int posY = wa.top + std::max(0, (int)((wa.bottom - wa.top) - winH) / 2);
 
-    g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, kMainClass, L"SwitchProXInput v1.1.1",
+    g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, kMainClass, L"SwitchProXInput v1.2.0",
                              style, posX, posY, winW, winH,
                              NULL, NULL, hInst, NULL);
     if (!g_hwnd) return 1;
@@ -1450,6 +1641,8 @@ int gui_run(HINSTANCE hInst, bool startHidden) {
 
     syncUI();
     addTrayIcon();
+    refreshStatus();
+    SetTimer(g_hwnd, 1, 750, NULL);      // keep the drift status line fresh
 
     if (!startHidden) {
         ShowWindow(g_hwnd, SW_SHOW);

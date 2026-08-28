@@ -21,6 +21,7 @@
 
 #include "engine.h"
 #include "config.h"
+#include "drift.h"
 
 // {4D1E55B2-F16F-11CF-88CB-001111000030} - GUID_DEVINTERFACE_HID
 DEFINE_GUID(GUID_DEVINTERFACE_HID,
@@ -96,6 +97,18 @@ static HANDLE         g_watchdog = NULL;
 
 const int MAX_SLOTS = 4;
 
+// Diagnostics snapshot of one stick's drift correction, written by the
+// reader thread on every report and read by the GUI.
+struct DriftSnap {
+    bool calibrating;
+    bool calibrated;
+    bool atRest;
+    int  type;
+    int  offX, offY;
+    int  noise;
+    int  autoDzPct;     // adaptive deadzone the engine actually applied (%)
+};
+
 struct Slot {
     CRITICAL_SECTION cs;              // lifetime: engine_start .. engine_stop
     PVIGEM_TARGET target;
@@ -109,6 +122,8 @@ struct Slot {
     int           index;
     DWORD         reportLen;
     DWORD         outputLen;
+    DriftSnap     driftSnap[2];       // guarded by cs (left, right)
+    volatile LONG calibReq;           // set by the GUI, consumed by the reader
 };
 
 static Slot g_slots[MAX_SLOTS];
@@ -347,6 +362,10 @@ static DWORD WINAPI readerThread(void* param) {
     int lastBattery = -1;
     bool disconnected = false;
 
+    // Fresh drift state for every connection: a newly plugged pad may be a
+    // different physical controller with its own wear.
+    StickDriftCorrector drift[2];
+
     while (g_running && !s.stop) {
         ResetEvent(ev);
         OVERLAPPED ov = {};
@@ -369,7 +388,57 @@ static DWORD WINAPI readerThread(void* param) {
             XUSB_REPORT rep = {};
             int battery = -1;
             Config cfgSnap = configSnapshot();
-            parseReport(buf.data(), got, cfgSnap, rep, battery);
+
+            // --- automatic stick-drift correction -------------------------
+            if (InterlockedExchange(&s.calibReq, 0)) {
+                drift[0].startCalibration();
+                drift[1].startCalibration();
+            }
+            bool fixOn = cfgSnap.driftFix != 0;
+            drift[0].configure(fixOn, cfgSnap.driftStrength);
+            drift[1].configure(fixOn, cfgSnap.driftStrength);
+
+            int lx = decodeStickX(buf.data() + 6), ly = decodeStickY(buf.data() + 6);
+            int rx = decodeStickX(buf.data() + 9), ry = decodeStickY(buf.data() + 9);
+            int olx, oly, orx, ory;
+            drift[0].process(lx, ly, olx, oly);   // re-centered raw values
+            drift[1].process(rx, ry, orx, ory);
+
+            // Adaptive deadzone: never go below the measured noise floor.
+            Config eff = cfgSnap;
+            int autoDzPct[2] = { 0, 0 };
+            if (fixOn && eff.driftAutoDeadzone) {
+                int rec[2] = { drift[0].recommendedDeadzoneRaw(),
+                               drift[1].recommendedDeadzoneRaw() };
+                int* dz[2] = { &eff.leftDeadzone, &eff.rightDeadzone };
+                int range[2] = { eff.leftStickRange, eff.rightStickRange };
+                for (int k = 0; k < 2; ++k) {
+                    if (range[k] > 0 && rec[k] > dz[k][0] * range[k] / 100) {
+                        int pct = (rec[k] * 100 + range[k] - 1) / range[k];
+                        if (pct > 90) pct = 90;
+                        autoDzPct[k] = pct;
+                        dz[k][0] = pct;
+                    }
+                }
+            }
+
+            parseReportCorrected(buf.data(), got, eff, olx, oly, orx, ory,
+                                 rep, battery);
+
+            // Diagnostics snapshot for the GUI.
+            EnterCriticalSection(&s.cs);
+            for (int k = 0; k < 2; ++k) {
+                DriftSnap& sn = s.driftSnap[k];
+                sn.calibrating = drift[k].calibrating();
+                sn.calibrated  = drift[k].calibrated();
+                sn.atRest      = drift[k].atRest();
+                sn.type        = (int)drift[k].classify();
+                sn.offX        = lroundf(drift[k].offsetX());
+                sn.offY        = lroundf(drift[k].offsetY());
+                sn.noise       = lroundf(drift[k].noiseSigma());
+                sn.autoDzPct   = autoDzPct[k];
+            }
+            LeaveCriticalSection(&s.cs);
 
             if (battery != lastBattery && battery >= 0 && battery <= 8) {
                 lastBattery = battery;
@@ -465,6 +534,9 @@ static void resetSlot(Slot& s, int index) {
     s.index = index;
     s.reportLen = 64;
     s.outputLen = 64;
+    s.driftSnap[0] = DriftSnap();
+    s.driftSnap[1] = DriftSnap();
+    s.calibReq = 0;
 }
 
 static void stopReaders() {
@@ -606,6 +678,45 @@ EngineStatus engine_get_status() {
     }
     LeaveCriticalSection(&g_slotsLock);
     return st;
+}
+
+void engine_calibrate_sticks() {
+    EnterCriticalSection(&g_slotsLock);
+    for (int i = 0; i < g_slotCount; ++i)
+        InterlockedExchange(&g_slots[i].calibReq, 1);
+    LeaveCriticalSection(&g_slotsLock);
+}
+
+bool engine_get_drift(int slot, DriftView& left, DriftView& right) {
+    left = DriftView();
+    right = DriftView();
+    Config cfg = configSnapshot();
+    bool ok = false;
+
+    EnterCriticalSection(&g_slotsLock);
+    if (slot >= 0 && slot < g_slotCount && g_slots[slot].alive) {
+        Slot& s = g_slots[slot];
+        EnterCriticalSection(&s.cs);
+        DriftView* out[2] = { &left, &right };
+        for (int k = 0; k < 2; ++k) {
+            const DriftSnap& sn = s.driftSnap[k];
+            out[k]->connected   = true;
+            out[k]->enabled     = cfg.driftFix != 0;
+            out[k]->autoDzOn    = cfg.driftAutoDeadzone != 0;
+            out[k]->calibrating = sn.calibrating;
+            out[k]->calibrated  = sn.calibrated;
+            out[k]->atRest      = sn.atRest;
+            out[k]->type        = sn.type;
+            out[k]->offX        = sn.offX;
+            out[k]->offY        = sn.offY;
+            out[k]->noise       = sn.noise;
+            out[k]->autoDzPct   = sn.autoDzPct;
+        }
+        LeaveCriticalSection(&s.cs);
+        ok = true;
+    }
+    LeaveCriticalSection(&g_slotsLock);
+    return ok;
 }
 
 void engine_stop() {

@@ -90,6 +90,9 @@ Config loadConfig() {
     cfg.invertRX = iniInt(ini.c_str(), L"Mapping", L"InvertRX", 0) != 0;
     cfg.invertRY = iniInt(ini.c_str(), L"Mapping", L"InvertRY", 0) != 0;
     cfg.enableRumble = iniInt(ini.c_str(), L"Features", L"EnableRumble", 1) != 0;
+    cfg.driftFix         = iniInt(ini.c_str(), L"DriftFix", L"Enable", 1) != 0;
+    cfg.driftAutoDeadzone= iniInt(ini.c_str(), L"DriftFix", L"AutoDeadzone", 1) != 0;
+    cfg.driftStrength    = std::max(0, std::min(2, iniInt(ini.c_str(), L"DriftFix", L"Strength", 1)));
 
     wchar_t buf[1024] = {};
     GetPrivateProfileStringW(L"General", L"Devices", L"057E:2009", buf, 1024, ini.c_str());
@@ -133,6 +136,13 @@ void saveConfig(const Config& cfg) {
     WritePrivateProfileStringW(L"Mapping", L"InvertRY", num, ini.c_str());
     swprintf(num, 32, L"%d", cfg.enableRumble ? 1 : 0);
     WritePrivateProfileStringW(L"Features", L"EnableRumble", num, ini.c_str());
+
+    swprintf(num, 32, L"%d", cfg.driftFix ? 1 : 0);
+    WritePrivateProfileStringW(L"DriftFix", L"Enable", num, ini.c_str());
+    swprintf(num, 32, L"%d", cfg.driftAutoDeadzone ? 1 : 0);
+    WritePrivateProfileStringW(L"DriftFix", L"AutoDeadzone", num, ini.c_str());
+    swprintf(num, 32, L"%d", cfg.driftStrength);
+    WritePrivateProfileStringW(L"DriftFix", L"Strength", num, ini.c_str());
 }
 
 AppPrefs loadPrefs() {

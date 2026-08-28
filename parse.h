@@ -74,6 +74,10 @@ struct Config {
     // actually report it the other way around.
     int  invertLX = 0, invertLY = 0, invertRX = 0, invertRY = 0;
     int  enableRumble    = 1;
+    // Automatic stick-drift correction (see drift.h).
+    int  driftFix        = 1;   // master switch: apply the learned corrections
+    int  driftAutoDeadzone = 1; // raise the deadzone to the measured noise floor
+    int  driftStrength   = 1;   // 0 gentle, 1 balanced, 2 aggressive
 };
 
 // Radial-deadzone stick conversion. rawX/rawY are 12-bit values centered on
@@ -91,14 +95,24 @@ inline void convertStick(int rawX, int rawY, int dzRaw, int range,
     outY = (int16_t)(dy * s);
 }
 
-inline void parseReport(const uint8_t* b, uint32_t len, const Config& cfg,
-                        XUSB_REPORT& out, int& battery) {
-    out = XUSB_REPORT{};
-    if (len < 12) return;
+// 12-bit packed stick decoding: X = b0 | ((b1 & 0x0F) << 8),
+//                               Y = (b1 >> 4) | (b2 << 4).
+inline int decodeStickX(const uint8_t* t) { return t[0] | ((t[1] & 0x0F) << 8); }
+inline int decodeStickY(const uint8_t* t) { return (t[1] >> 4) | (t[2] << 4); }
 
-    uint8_t id = b[0];
-    if (id != 0x30 && id != 0x21 && id != 0x31 && id != 0x32 && id != 0x33) return;
+// Convert (possibly drift-corrected) raw stick values into the report.
+inline void applySticks(XUSB_REPORT& out, int lx, int ly, int rx, int ry,
+                        const Config& cfg) {
+    convertStick(lx, ly, cfg.leftDeadzone  * cfg.leftStickRange  / 100, cfg.leftStickRange,
+                 cfg.invertLX != 0, cfg.invertLY != 0, out.sThumbLX, out.sThumbLY);
+    convertStick(rx, ry, cfg.rightDeadzone * cfg.rightStickRange / 100, cfg.rightStickRange,
+                 cfg.invertRX != 0, cfg.invertRY != 0, out.sThumbRX, out.sThumbRY);
+}
 
+// Parse buttons / triggers / battery from a valid full report. The sticks
+// are left untouched; feed them through applySticks() afterwards.
+inline void parseButtons(const uint8_t* b, const Config& cfg, XUSB_REPORT& out,
+                         int& battery) {
     const uint8_t* b3 = b + 3;   // buttons byte 0
     const uint8_t* b4 = b + 4;   // buttons byte 1
     const uint8_t* b5 = b + 5;   // buttons byte 2
@@ -159,16 +173,34 @@ inline void parseReport(const uint8_t* b, uint32_t len, const Config& cfg,
     if (rb) out.wButtons |= XUSB_GAMEPAD_RIGHT_SHOULDER;
     if (lt) out.bLeftTrigger  = 0xFF;
     if (rt) out.bRightTrigger = 0xFF;
+}
 
-    // --- Sticks ------------------------------------------------------------
-    // 12-bit packed: X = b0 | ((b1 & 0x0F) << 8), Y = (b1 >> 4) | (b2 << 4).
-    int lx = b[6]  | ((b[7] & 0x0F) << 8);
-    int ly = (b[7] >> 4) | (b[8] << 4);
-    int rx = b[9]  | ((b[10] & 0x0F) << 8);
-    int ry = (b[10] >> 4) | (b[11] << 4);
+// Returns false when the buffer is not a usable full input report.
+inline bool isFullReport(const uint8_t* b, uint32_t len) {
+    if (len < 12) return false;
+    uint8_t id = b[0];
+    return id == 0x30 || id == 0x21 || id == 0x31 || id == 0x32 || id == 0x33;
+}
 
-    convertStick(lx, ly, cfg.leftDeadzone  * cfg.leftStickRange  / 100, cfg.leftStickRange,
-                 cfg.invertLX != 0, cfg.invertLY != 0, out.sThumbLX, out.sThumbLY);
-    convertStick(rx, ry, cfg.rightDeadzone * cfg.rightStickRange / 100, cfg.rightStickRange,
-                 cfg.invertRX != 0, cfg.invertRY != 0, out.sThumbRX, out.sThumbRY);
+// Parse a full report exactly as it came off the wire (sticks decoded from
+// the report bytes, no drift correction).
+inline void parseReport(const uint8_t* b, uint32_t len, const Config& cfg,
+                        XUSB_REPORT& out, int& battery) {
+    out = XUSB_REPORT{};
+    if (!isFullReport(b, len)) return;
+    parseButtons(b, cfg, out, battery);
+    applySticks(out, decodeStickX(b + 6), decodeStickY(b + 6),
+                     decodeStickX(b + 9), decodeStickY(b + 9), cfg);
+}
+
+// Parse a full report using pre-decoded raw stick values. The engine runs
+// the decoded values through the drift correctors (drift.h) first, so the
+// sticks passed in here are already re-centered / de-noised as needed.
+inline void parseReportCorrected(const uint8_t* b, uint32_t len, const Config& cfg,
+                                 int rawLX, int rawLY, int rawRX, int rawRY,
+                                 XUSB_REPORT& out, int& battery) {
+    out = XUSB_REPORT{};
+    if (!isFullReport(b, len)) return;
+    parseButtons(b, cfg, out, battery);
+    applySticks(out, rawLX, rawLY, rawRX, rawRY, cfg);
 }

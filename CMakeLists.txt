@@ -30,3 +30,19 @@ if(MINGW)
     # Self-contained binary: no libgcc/libstdc++ DLLs needed next to the exe.
     target_link_options(SwitchProXInput PRIVATE -static)
 endif()
+
+# Unit tests for the pure-logic parts (parser + drift correction). They have
+# no Windows dependencies and run on any platform.
+option(SXPX_BUILD_TESTS "Build unit tests (parse_test, drift_test)" OFF)
+if(SXPX_BUILD_TESTS)
+    enable_testing()
+    add_executable(parse_test tests/parse_test.cpp)
+    add_executable(drift_test tests/drift_test.cpp)
+    add_executable(pipeline_test tests/pipeline_test.cpp)
+    target_include_directories(parse_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(drift_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(pipeline_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    add_test(NAME parse_test COMMAND parse_test)
+    add_test(NAME drift_test COMMAND drift_test)
+    add_test(NAME pipeline_test COMMAND pipeline_test)
+endif()

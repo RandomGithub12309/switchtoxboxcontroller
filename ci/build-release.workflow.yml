@@ -1,0 +1,58 @@
+# Builds SwitchProXInput.exe on a Windows runner (MSVC via build.bat),
+# packages it with ViGEmClient.dll / the INI / README / SHA256SUMS.txt,
+# and publishes a ready-to-download GitHub release.
+name: Windows build & release
+
+on:
+  push:
+    branches:
+      - "arena/01a039ee-switchtoxboxcontroller"
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build with MSVC (build.bat)
+        shell: pwsh
+        run: |
+          $vcvars = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\*\*\VC\Auxiliary\Build\vcvars64.bat" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $vcvars) { throw "vcvars64.bat not found on the runner" }
+          Write-Host "Using $($vcvars.FullName)"
+          cmd /c "`"$($vcvars.FullName)`" && build.bat"
+          if ($LASTEXITCODE -ne 0) { throw "build.bat failed" }
+          Get-FileHash .\SwitchProXInput.exe -Algorithm SHA256
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $dir = "SwitchProXInput-v1.2.0"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item SwitchProXInput.exe, ViGEmClient.dll, SwitchProXInput.ini, README.md, LICENSE -Destination $dir
+          $files = "SwitchProXInput.exe","ViGEmClient.dll","SwitchProXInput.ini","README.md"
+          $sums = $files | ForEach-Object {
+            $h = (Get-FileHash (Join-Path $dir $_) -Algorithm SHA256).Hash.ToLower()
+            "$h  $_"
+          }
+          Set-Content -Path (Join-Path $dir "SHA256SUMS.txt") -Value ($sums -join "`n") -Encoding ascii
+          Compress-Archive -Path $dir -DestinationPath "SwitchProXInput-v1.2.0-win64.zip" -Force
+          Get-FileHash .\SwitchProXInput-v1.2.0-win64.zip -Algorithm SHA256
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v1.2.0"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" \
+              --target "${{ github.sha }}" \
+              --title "v1.2.0 - automatic stick-drift fix" \
+              --notes "Ready-to-run Windows 64-bit build. Requirements: Windows 10/11 and the ViGEmBus driver (see README). Unzip anywhere and run SwitchProXInput.exe. Verify files with SHA256SUMS.txt inside."
+          gh release upload "$tag" SwitchProXInput-v1.2.0-win64.zip --clobber
