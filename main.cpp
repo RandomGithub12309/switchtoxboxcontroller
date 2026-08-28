@@ -45,6 +45,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int) {
     if (mutex && GetLastError() == ERROR_ALREADY_EXISTS) {
         HWND other = FindWindowW(gui_class_name(), NULL);
         if (other) {
+            // If the running instance is an older build, tell the user -
+            // otherwise this new exe silently exits and it looks broken.
+            wchar_t title[160] = {};
+            GetWindowTextW(other, title, 160);
+            if (wcsstr(title, L"v1.2.1") == NULL) {
+                MessageBoxW(NULL,
+                    L"An older SwitchProXInput is already running and this "
+                    L"version will not start next to it.\n\n"
+                    L"Exit the old one first (its tray icon \u2192 right-click \u2192 Exit, "
+                    L"or Task Manager), then run this version again.",
+                    L"SwitchProXInput v1.2.1", MB_ICONINFORMATION);
+            }
             ShowWindow(other, SW_SHOW);
             SetForegroundWindow(other);
         }

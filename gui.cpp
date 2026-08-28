@@ -1096,7 +1096,7 @@ static void paintBottomBar(HDC hdc) {
 
     drawTextC(hdc, { g_rcBtnDefaults.right + S(12), g_rcBtnDefaults.top,
                      g_rcBtnHide.left - S(12), g_rcBtnDefaults.bottom },
-              L"v1.2.0", g_fSmall, COL_DIM,
+              L"v1.2.1", g_fSmall, COL_DIM,
               DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
@@ -1590,7 +1590,7 @@ int gui_run(HINSTANCE hInst, bool startHidden) {
     int posX = wa.left + std::max(0, (int)((wa.right - wa.left) - winW) / 2);
     int posY = wa.top + std::max(0, (int)((wa.bottom - wa.top) - winH) / 2);
 
-    g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, kMainClass, L"SwitchProXInput v1.2.0",
+    g_hwnd = CreateWindowExW(WS_EX_APPWINDOW, kMainClass, L"SwitchProXInput v1.2.1",
                              style, posX, posY, winW, winH,
                              NULL, NULL, hInst, NULL);
     if (!g_hwnd) return 1;

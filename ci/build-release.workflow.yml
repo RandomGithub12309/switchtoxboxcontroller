@@ -32,7 +32,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $dir = "SwitchProXInput-v1.2.0"
+          $dir = "SwitchProXInput-v1.2.1"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           Copy-Item SwitchProXInput.exe, ViGEmClient.dll, SwitchProXInput.ini, README.md, LICENSE -Destination $dir
           $files = "SwitchProXInput.exe","ViGEmClient.dll","SwitchProXInput.ini","README.md"
@@ -41,18 +41,18 @@ jobs:
             "$h  $_"
           }
           Set-Content -Path (Join-Path $dir "SHA256SUMS.txt") -Value ($sums -join "`n") -Encoding ascii
-          Compress-Archive -Path $dir -DestinationPath "SwitchProXInput-v1.2.0-win64.zip" -Force
-          Get-FileHash .\SwitchProXInput-v1.2.0-win64.zip -Algorithm SHA256
+          Compress-Archive -Path $dir -DestinationPath "SwitchProXInput-v1.2.1-win64.zip" -Force
+          Get-FileHash .\SwitchProXInput-v1.2.1-win64.zip -Algorithm SHA256
 
       - name: Publish release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="v1.2.0"
+          tag="v1.2.1"
           gh release view "$tag" >/dev/null 2>&1 || \
             gh release create "$tag" \
               --target "${{ github.sha }}" \
-              --title "v1.2.0 - automatic stick-drift fix" \
+              --title "v1.2.1 - automatic stick-drift fix" \
               --notes "Ready-to-run Windows 64-bit build. Requirements: Windows 10/11 and the ViGEmBus driver (see README). Unzip anywhere and run SwitchProXInput.exe. Verify files with SHA256SUMS.txt inside."
-          gh release upload "$tag" SwitchProXInput-v1.2.0-win64.zip --clobber
+          gh release upload "$tag" SwitchProXInput-v1.2.1-win64.zip --clobber

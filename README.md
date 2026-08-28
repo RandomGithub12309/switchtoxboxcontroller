@@ -31,10 +31,12 @@ icon, and an optional "start with Windows" entry.
 
 ## Quick start
 
-**Ready-to-run download:** [`release/SwitchProXInput-v1.2.0-win64.zip`](release/SwitchProXInput-v1.2.0-win64.zip)
+**Ready-to-run download:** [`release/SwitchProXInput-v1.2.1-win64.zip`](release/SwitchProXInput-v1.2.1-win64.zip)
 contains the 64-bit exe, `ViGEmClient.dll`, the config file, this README and
 `SHA256SUMS.txt`. (GitHub: *Code → Download ZIP* works too, the files sit at
-the repo root as well.)
+the repo root as well.) The window title bar shows the version — it should
+say **v1.2.1**; if it says v1.1.1 an older copy is still running (exit it
+from its tray icon first).
 
 1. Install the ViGEmBus driver (above).
 2. Unzip so `SwitchProXInput.exe`, `ViGEmClient.dll` and
@@ -171,6 +173,10 @@ CloseToTray=1
 
 ## Changelog
 
+- **v1.2.1** — Startup fix: when an older copy of the app is still running
+  (e.g. hidden in the tray), starting the new one no longer silently exits —
+  it explains the clash and shows the running window. The ready-to-run
+  build is a proper GUI app (no console window).
 - **v1.2.0** — Automatic stick-drift fix: the app detects the type of drift
   on each stick (center offset / jitter / both) and its direction,
   continuously learns the true resting center, and applies corrections plus
@@ -225,7 +231,7 @@ produces the resource object `windres app.rc -O coff app_res.o` normally
 makes (icon, manifest, VERSIONINFO):
 
 ```
-python3 tools/mkres.py icon.ico app.manifest app_res.o --version 1.2.0.0
+python3 tools/mkres.py icon.ico app.manifest app_res.o --version 1.2.1.0
 ```
 
 Add `app_res.o` to the compile line in place of the `windres` output. The
@@ -291,6 +297,23 @@ settings need to change.
 **"Driver not connected" in the status panel** — ViGEmBus isn't installed (or
 the service didn't start after the reboot). Install it from
 <https://github.com/nefarius/ViGEmBus/releases>, reboot, press *Retry*.
+
+**My inputs aren't showing up in games / nothing happens when I start the
+new version** — check, in order:
+1. The window title bar says the version you expect (currently **v1.2.1**).
+   Only one copy of the app can run at a time: if an older build is still
+   alive in the tray, the new one will not start (it now tells you so).
+   Exit the old one first: tray icon → right-click → *Exit* (or Task
+   Manager → end *SwitchProXInput*), then start the new exe again.
+2. The status panel shows *ViGEmBus driver: Connected* — otherwise see the
+   item above.
+3. `SwitchProXInput.exe` sits in the same folder as `ViGEmClient.dll`
+   (the release zip is laid out like that).
+4. The controller line shows your pad as connected; try another cable/port
+   if not.
+5. Games see the **virtual Xbox 360 pad**, not the raw Pro Controller —
+   in Steam, disable *Settings → Controller → Switch Pro Configuration
+   Support* so it doesn't fight the raw device (see below).
 
 **SmartScreen warning on the exe** — the binary is unsigned (normal for open
 source tools). "More info → Run anyway", or build it yourself.
